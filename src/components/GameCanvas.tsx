@@ -1,16 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { useGameStore } from '../stores/useGameStore';
-import type { Ball, Table } from '../game/types';
+import type { Ball, ReplayFrame, Table } from '../game/types';
 import {
   BALL_RADIUS,
   PLAYFIELD_LEFT,
   PLAYFIELD_RIGHT,
   PLAYFIELD_TOP,
   PLAYFIELD_BOTTOM,
+  BALL_COLORS,
 } from '../game/constants';
-import { v } from '../utils/math';
 import { predictShot } from '../game/prediction';
-import { drawTable, drawBall, clearCanvas, roundRect } from '../game/draw-helpers';
+import { drawTable, drawBall, roundRect } from '../game/draw-helpers';
 
 const CANVAS_W = 880;
 const CANVAS_H = 480;
@@ -30,11 +30,13 @@ export default function GameCanvas() {
   const isCharging = useGameStore((s) => s.isCharging);
   const showAimLine = useGameStore((s) => s.showAimLine);
   const freeBall = useGameStore((s) => s.freeBall);
-  const foul = useGameStore((s) => s.foul);
   const foulMessage = useGameStore((s) => s.foulMessage);
   const winner = useGameStore((s) => s.winner);
   const currentPlayerId = useGameStore((s) => s.currentPlayerId);
   const players = useGameStore((s) => s.players);
+  const slowMotionActive = useGameStore((s) => s.slowMotionActive);
+  const slowMotionFrames = useGameStore((s) => s.slowMotionFrames);
+  const slowMotionFrameIndex = useGameStore((s) => s.slowMotionFrameIndex);
 
   const setAimAngle = useGameStore((s) => s.setAimAngle);
   const startCharge = useGameStore((s) => s.startCharge);
@@ -44,6 +46,7 @@ export default function GameCanvas() {
   const resolveTurn = useGameStore((s) => s.resolveTurn);
   const aiTakeTurn = useGameStore((s) => s.aiTakeTurn);
   const placeFreeBall = useGameStore((s) => s.placeFreeBall);
+  const tickSlowMotion = useGameStore((s) => s.tickSlowMotion);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -56,29 +59,35 @@ export default function GameCanvas() {
       const dt = Math.min(0.05, (time - lastTimeRef.current) / 1000);
       lastTimeRef.current = time;
 
-      const curPhase = useGameStore.getState().phase;
-      const curBalls = useGameStore.getState().balls;
+      const state = useGameStore.getState();
+      const curPhase = state.phase;
+      const curBalls = state.balls;
+      const curSlowActive = state.slowMotionActive;
 
-      if (curPhase === 'charging') {
-        updateCharge(dt);
-        animRef.current.cueShrink = Math.min(0.6, power * 0.5);
+      if (curSlowActive) {
+        tickSlowMotion(dt);
       } else {
-        animRef.current.cueShrink *= 0.9;
-      }
+        if (curPhase === 'charging') {
+          updateCharge(dt);
+          animRef.current.cueShrink = Math.min(0.6, power * 0.5);
+        } else {
+          animRef.current.cueShrink *= 0.9;
+        }
 
-      if (curPhase === 'simulating') {
-        simulateStep();
-      }
+        if (curPhase === 'simulating') {
+          simulateStep();
+        }
 
-      if (curPhase === 'resolving') {
-        resolveTurn();
-      }
+        if (curPhase === 'resolving') {
+          resolveTurn();
+        }
 
-      if (curPhase === 'aiming' && !freeBall) {
-        const curPlayer = players.find((p) => p.id === currentPlayerId);
-        if (curPlayer?.isAI && time - lastAITime > 800) {
-          lastAITime = time;
-          aiTakeTurn();
+        if (curPhase === 'aiming' && !state.freeBall) {
+          const curPlayer = state.players.find((p) => p.id === state.currentPlayerId);
+          if (curPlayer?.isAI && time - lastAITime > 800) {
+            lastAITime = time;
+            aiTakeTurn();
+          }
         }
       }
 
@@ -106,6 +115,7 @@ export default function GameCanvas() {
     };
 
     const onMove = (e: MouseEvent) => {
+      if (slowMotionActive) return;
       const pt = toLocal(e);
       mouseRef.current = pt;
       const cue = balls.find((b) => b.id === 0);
@@ -119,6 +129,7 @@ export default function GameCanvas() {
     };
 
     const onDown = (e: MouseEvent) => {
+      if (slowMotionActive) return;
       const pt = toLocal(e);
       if (freeBall) {
         placeFreeBall(pt.x, pt.y);
@@ -133,6 +144,7 @@ export default function GameCanvas() {
     };
 
     const onUp = () => {
+      if (slowMotionActive) return;
       if (isCharging) {
         releaseShot();
       }
@@ -146,7 +158,7 @@ export default function GameCanvas() {
       canvas.removeEventListener('mousedown', onDown);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [balls, phase, freeBall, isCharging, currentPlayerId, players]);
+  }, [balls, phase, freeBall, isCharging, currentPlayerId, players, slowMotionActive]);
 
   const draw = (ctx: CanvasRenderingContext2D, curBalls: Ball[], t: Table) => {
     ctx.fillStyle = '#0a0f0a';
@@ -154,13 +166,17 @@ export default function GameCanvas() {
 
     drawTable(ctx, t);
 
-    if (showAimLine && phase === 'aiming' && !freeBall) {
+    if (slowMotionActive) {
+      drawTrajectories(ctx, slowMotionFrames, slowMotionFrameIndex);
+    }
+
+    if (!slowMotionActive && showAimLine && phase === 'aiming' && !freeBall) {
       const activePower = power > 0 ? power : 0.5;
       const prediction = predictShot(curBalls, aimAngle, activePower, 1, 120);
       drawAimLine(ctx, curBalls, prediction);
     }
 
-    if (freeBall) {
+    if (!slowMotionActive && freeBall) {
       drawFreeBallHint(ctx);
     }
 
@@ -168,7 +184,7 @@ export default function GameCanvas() {
       if (!b.pocketed) drawBall(ctx, b);
     }
 
-    if (phase === 'aiming' && !freeBall) {
+    if (!slowMotionActive && phase === 'aiming' && !freeBall) {
       const cue = curBalls.find((bb) => bb.id === 0);
       const curPlayer = players.find((p) => p.id === currentPlayerId);
       if (cue && !curPlayer?.isAI) {
@@ -176,7 +192,11 @@ export default function GameCanvas() {
       }
     }
 
-    if (foulMessage && phase !== 'gameover') {
+    if (slowMotionActive) {
+      drawSlowMotionBanner(ctx);
+    }
+
+    if (!slowMotionActive && foulMessage && phase !== 'gameover') {
       drawFoulBanner(ctx, foulMessage);
     }
 
@@ -360,13 +380,119 @@ export default function GameCanvas() {
     ctx.restore();
   };
 
+  const drawTrajectories = (
+    ctx: CanvasRenderingContext2D,
+    frames: ReplayFrame[],
+    currentIndex: number,
+  ) => {
+    if (frames.length < 2) return;
+
+    const endIdx = Math.min(currentIndex + 1, frames.length);
+    const ballIds = new Set<number>();
+    for (const f of frames) {
+      for (const b of f.balls) {
+        if (b.id === 0 || (!b.pocketed && b.id !== 0)) {
+          ballIds.add(b.id);
+        }
+      }
+    }
+
+    for (const ballId of ballIds) {
+      const points: { x: number; y: number }[] = [];
+      for (let i = 0; i < endIdx; i++) {
+        const frame = frames[i];
+        const ball = frame.balls.find((b) => b.id === ballId);
+        if (ball && !ball.pocketed) {
+          points.push({ x: ball.pos.x, y: ball.pos.y });
+        }
+      }
+
+      if (points.length < 2) continue;
+
+      const colorInfo = BALL_COLORS[ballId];
+      const isCue = ballId === 0;
+
+      ctx.save();
+      ctx.strokeStyle = isCue
+        ? 'rgba(245,208,75,0.85)'
+        : colorInfo
+          ? `${colorInfo.color}cc`
+          : 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = isCue ? 3.5 : 2.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      const grad = ctx.createLinearGradient(
+        points[0].x,
+        points[0].y,
+        points[points.length - 1].x,
+        points[points.length - 1].y,
+      );
+      if (isCue) {
+        grad.addColorStop(0, 'rgba(245,208,75,0.15)');
+        grad.addColorStop(1, 'rgba(245,208,75,0.9)');
+      } else if (colorInfo) {
+        grad.addColorStop(0, `${colorInfo.color}22`);
+        grad.addColorStop(1, `${colorInfo.color}dd`);
+      } else {
+        grad.addColorStop(0, 'rgba(255,255,255,0.1)');
+        grad.addColorStop(1, 'rgba(255,255,255,0.7)');
+      }
+      ctx.strokeStyle = grad;
+
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.stroke();
+
+      if (isCue && points.length > 0) {
+        const last = points[points.length - 1];
+        ctx.beginPath();
+        ctx.arc(last.x, last.y, BALL_RADIUS + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(245,208,75,0.6)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.restore();
+    }
+  };
+
+  const drawSlowMotionBanner = (ctx: CanvasRenderingContext2D) => {
+    ctx.save();
+    ctx.fillStyle = 'rgba(14,116,144,0.25)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    const w = 200;
+    const h = 40;
+    const x = (CANVAS_W - w) / 2;
+    const y = 20;
+    ctx.fillStyle = 'rgba(8,47,73,0.85)';
+    roundRect(ctx, x, y, w, h, 10);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(56,189,248,0.7)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#7dd3fc';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🎬 慢动作回放 0.25x', x + w / 2, y + h / 2);
+    ctx.restore();
+  };
+
   return (
     <div className="relative inline-block">
       <canvas
         ref={canvasRef}
         width={CANVAS_W}
         height={CANVAS_H}
-        className="rounded-xl shadow-2xl border border-amber-900/60 cursor-crosshair"
+        className={`rounded-xl shadow-2xl border border-amber-900/60 ${slowMotionActive ? 'cursor-default' : 'cursor-crosshair'}`}
         style={{ maxWidth: '100%', height: 'auto' }}
       />
     </div>

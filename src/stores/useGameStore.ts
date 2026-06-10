@@ -25,7 +25,11 @@ import {
   recordFrame,
   stopRecording,
   generateReplay,
+  startShotRecording,
+  stopShotRecording,
+  getShotFrames,
 } from '../game/replay';
+import type { ReplayFrame } from '../game/types';
 import { saveReplay } from '../utils/storage';
 
 interface UIState {
@@ -41,6 +45,11 @@ interface UIState {
   replayProgress: number;
   replayPlaying: boolean;
   replaySpeed: number;
+  slowMotionActive: boolean;
+  slowMotionFrames: ReplayFrame[];
+  slowMotionFrameIndex: number;
+  slowMotionAccumulator: number;
+  slowMotionPreState: { balls: Ball[]; phase: GamePhase } | null;
 }
 
 interface GameStore extends GameState, UIState {
@@ -73,6 +82,9 @@ interface GameStore extends GameState, UIState {
   setBalls: (balls: Ball[]) => void;
   clearFoul: () => void;
   backToMenu: () => void;
+  startSlowMotion: () => void;
+  tickSlowMotion: (dt: number) => void;
+  exitSlowMotion: () => void;
 }
 
 function createPlayers(
@@ -128,11 +140,17 @@ export const useGameStore = create<GameStore>((set, get) => ({
   replayProgress: 0,
   replayPlaying: false,
   replaySpeed: 1,
+  slowMotionActive: false,
+  slowMotionFrames: [],
+  slowMotionFrameIndex: 0,
+  slowMotionAccumulator: 0,
+  slowMotionPreState: null,
 
   startGame: (mode, playMode, aiDifficulty) => {
     const balls = setupBalls(mode);
     const players = createPlayers(playMode, aiDifficulty);
     startRecording(balls);
+    stopShotRecording();
 
     set({
       mode,
@@ -154,6 +172,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aimAngle: 0,
       power: 0,
       isCharging: false,
+      slowMotionActive: false,
+      slowMotionFrames: [],
+      slowMotionFrameIndex: 0,
+      slowMotionAccumulator: 0,
+      slowMotionPreState: null,
     });
   },
 
@@ -191,6 +214,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     };
     applyShot(s.balls, s.aimAngle, s.power, MAX_POWER);
     recordReplayShot(shot);
+    startShotRecording();
     set({ isCharging: false, currentShot: shot, phase: 'simulating', power: 0 });
   },
 
@@ -235,6 +259,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   resolveTurn: () => {
     const s = get();
     if (s.phase !== 'resolving' || !s.currentShot) return;
+    stopShotRecording();
 
     const currentPlayer = s.players.find((p) => p.id === s.currentPlayerId)!;
     const foulResult = checkFoul(s.mode, s.balls, s.currentShot, currentPlayer, s.groupsAssigned);
@@ -358,6 +383,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   backToMenu: () => {
     stopRecording();
+    stopShotRecording();
     set({
       phase: 'setup',
       balls: [],
@@ -365,6 +391,102 @@ export const useGameStore = create<GameStore>((set, get) => ({
       replayRecording: false,
       menuTab: 'home',
       replayId: null,
+      slowMotionActive: false,
+      slowMotionFrames: [],
+      slowMotionFrameIndex: 0,
+      slowMotionAccumulator: 0,
+      slowMotionPreState: null,
+    });
+  },
+
+  startSlowMotion: () => {
+    const s = get();
+    if (s.slowMotionActive) return;
+    const frames = getShotFrames();
+    if (frames.length < 2) return;
+
+    set({
+      slowMotionActive: true,
+      slowMotionFrames: frames,
+      slowMotionFrameIndex: 0,
+      slowMotionAccumulator: 0,
+      slowMotionPreState: {
+        balls: JSON.parse(JSON.stringify(s.balls)),
+        phase: s.phase,
+      },
+    });
+  },
+
+  tickSlowMotion: (dt: number) => {
+    const s = get();
+    if (!s.slowMotionActive) return;
+
+    const frames = s.slowMotionFrames;
+    if (frames.length === 0) {
+      get().exitSlowMotion();
+      return;
+    }
+
+    const slowFactor = 4;
+    const frameInterval = 1 / 60;
+    const slowInterval = frameInterval * slowFactor;
+
+    let accumulator = s.slowMotionAccumulator + dt;
+    let frameIndex = s.slowMotionFrameIndex;
+
+    while (accumulator >= slowInterval && frameIndex < frames.length - 1) {
+      accumulator -= slowInterval;
+      frameIndex++;
+    }
+
+    if (frameIndex >= frames.length - 1) {
+      frameIndex = frames.length - 1;
+      const lastFrame = frames[frameIndex];
+      set({
+        slowMotionFrameIndex: frameIndex,
+        slowMotionAccumulator: 0,
+        balls: JSON.parse(JSON.stringify(lastFrame.balls)),
+      });
+      setTimeout(() => {
+        get().exitSlowMotion();
+      }, 400);
+      return;
+    }
+
+    const before = frames[frameIndex];
+    const after = frames[frameIndex + 1];
+    const t = accumulator / slowInterval;
+
+    const balls: Ball[] = before.balls.map((bb, idx) => {
+      const ab = after.balls[idx] || bb;
+      return {
+        ...bb,
+        pos: {
+          x: bb.pos.x + (ab.pos.x - bb.pos.x) * t,
+          y: bb.pos.y + (ab.pos.y - bb.pos.y) * t,
+        },
+        pocketed: t < 0.5 ? bb.pocketed : ab.pocketed,
+      };
+    });
+
+    set({
+      slowMotionFrameIndex: frameIndex,
+      slowMotionAccumulator: accumulator,
+      balls,
+    });
+  },
+
+  exitSlowMotion: () => {
+    const s = get();
+    if (!s.slowMotionActive || !s.slowMotionPreState) return;
+
+    set({
+      slowMotionActive: false,
+      slowMotionFrameIndex: 0,
+      slowMotionAccumulator: 0,
+      balls: JSON.parse(JSON.stringify(s.slowMotionPreState.balls)),
+      phase: s.slowMotionPreState.phase,
+      slowMotionPreState: null,
     });
   },
 }));

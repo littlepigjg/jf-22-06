@@ -2,6 +2,7 @@ import { useGameStore } from '../stores/useGameStore';
 import { getLegalFirstBalls } from '../game/rules';
 import { BALL_COLORS } from '../game/constants';
 import type { GameMode } from '../game/types';
+import { Play, SkipForward } from 'lucide-react';
 
 export default function HUD() {
   const currentPlayerId = useGameStore((s) => s.currentPlayerId);
@@ -12,6 +13,12 @@ export default function HUD() {
   const targetBallHint = useGameStore((s) => s.targetBallHint);
   const turnNumber = useGameStore((s) => s.turnNumber);
   const phase = useGameStore((s) => s.phase);
+  const shotHistory = useGameStore((s) => s.shotHistory);
+  const slowMotionActive = useGameStore((s) => s.slowMotionActive);
+  const slowMotionFrames = useGameStore((s) => s.slowMotionFrames);
+  const slowMotionFrameIndex = useGameStore((s) => s.slowMotionFrameIndex);
+  const startSlowMotion = useGameStore((s) => s.startSlowMotion);
+  const exitSlowMotion = useGameStore((s) => s.exitSlowMotion);
 
   const currentPlayer = players.find((p) => p.id === currentPlayerId);
 
@@ -42,18 +49,44 @@ export default function HUD() {
 
       <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl bg-black/40 backdrop-blur-md border border-amber-700/30">
         <div className="flex items-center gap-3">
-          <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+          <div className={`w-2 h-2 rounded-full ${slowMotionActive ? 'bg-sky-400 animate-pulse' : 'bg-amber-400 animate-pulse'}`} />
           <span className="text-amber-200/80 text-sm">
             回合 <span className="font-bold text-amber-300">{turnNumber}</span>
           </span>
           <span className="text-zinc-500 text-xs">·</span>
           <span className="text-zinc-400 text-sm">
-            阶段：<span className="text-zinc-200">{phaseLabel(phase)}</span>
+            阶段：<span className="text-zinc-200">{slowMotionActive ? '慢动作回放' : phaseLabel(phase)}</span>
           </span>
         </div>
 
         <div className="flex items-center gap-3">
-          {legalIds.length > 0 && (
+          {slowMotionActive && slowMotionFrames.length > 0 && (
+            <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-sky-900/40 border border-sky-600/50">
+              <span className="text-sky-300 text-xs font-mono">
+                {slowMotionFrameIndex + 1} / {slowMotionFrames.length}
+              </span>
+              <span className="text-sky-400 text-xs">0.25x</span>
+              <button
+                onClick={exitSlowMotion}
+                className="ml-1 p-1 rounded hover:bg-sky-700/50 text-sky-300 hover:text-sky-100 transition-colors"
+                title="跳过慢放"
+              >
+                <SkipForward className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {!slowMotionActive && phase === 'aiming' && shotHistory.length > 0 && (
+            <button
+              onClick={startSlowMotion}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-br from-sky-600/30 to-sky-800/40 border border-sky-500/50 text-sky-200 hover:text-sky-100 hover:from-sky-600/50 hover:to-sky-800/60 transition-all text-sm font-semibold shadow-[0_0_15px_rgba(56,189,248,0.15)]"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>慢放</span>
+            </button>
+          )}
+
+          {legalIds.length > 0 && !slowMotionActive && (
             <div className="flex items-center gap-2">
               <span className="text-zinc-400 text-sm">目标球：</span>
               <div className="flex gap-1">

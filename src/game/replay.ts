@@ -7,6 +7,9 @@ let startTime = 0;
 let frameCounter = 0;
 let isRecording = false;
 
+let shotFrameBuffer: ReplayFrame[] = [];
+let shotRecording = false;
+
 export function startRecording(balls: Ball[]): void {
   frameBuffer = [];
   shotBuffer = [];
@@ -20,12 +23,30 @@ export function stopRecording(): void {
   isRecording = false;
 }
 
+export function startShotRecording(): void {
+  shotFrameBuffer = [];
+  shotRecording = true;
+}
+
+export function stopShotRecording(): void {
+  shotRecording = false;
+}
+
+export function recordShotFrame(frame: ReplayFrame): void {
+  if (!shotRecording) return;
+  shotFrameBuffer.push(JSON.parse(JSON.stringify(frame)));
+}
+
+export function getShotFrames(): ReplayFrame[] {
+  return shotFrameBuffer;
+}
+
 export function recordFrame(
   balls: Ball[],
   phase: GamePhase,
   currentPlayerId: number,
 ): void {
-  if (!isRecording) return;
+  if (!isRecording && !shotRecording) return;
 
   if (frameCounter % 2 === 0) {
     const frame: ReplayFrame = {
@@ -46,7 +67,12 @@ export function recordFrame(
       phase,
       currentPlayerId,
     };
-    frameBuffer.push(frame);
+    if (isRecording) {
+      frameBuffer.push(frame);
+    }
+    if (shotRecording) {
+      shotFrameBuffer.push(JSON.parse(JSON.stringify(frame)));
+    }
   }
   frameCounter++;
 }
