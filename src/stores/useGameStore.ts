@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import type {
   Ball,
-  FoulType,
   GameMode,
   GamePhase,
   GameState,
@@ -13,7 +12,6 @@ import { FoulType as FoulTypeEnum } from '../game/types';
 import {
   MAX_POWER,
   TABLE,
-  FOUL_MESSAGES,
 } from '../game/constants';
 import { setupBalls, resetCueBall, placeCueBall } from '../game/table-setup';
 import { applyShot, allBallsStopped, stepPhysics } from '../game/physics';
@@ -29,7 +27,13 @@ import {
   stopShotRecording,
   getShotFrames,
 } from '../game/replay';
-import type { ReplayFrame } from '../game/types';
+import {
+  createInitialSlowMotionState,
+  extractHitBallIds,
+  computeSlowMotionTick,
+  SLOW_MOTION_END_DELAY_MS,
+} from '../game/slow-motion';
+import type { SlowMotionState } from '../game/slow-motion';
 import { saveReplay } from '../utils/storage';
 
 interface UIState {
@@ -45,11 +49,7 @@ interface UIState {
   replayProgress: number;
   replayPlaying: boolean;
   replaySpeed: number;
-  slowMotionActive: boolean;
-  slowMotionFrames: ReplayFrame[];
-  slowMotionFrameIndex: number;
-  slowMotionAccumulator: number;
-  slowMotionPreState: { balls: Ball[]; phase: GamePhase } | null;
+  slowMotion: SlowMotionState;
 }
 
 interface GameStore extends GameState, UIState {
@@ -140,11 +140,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   replayProgress: 0,
   replayPlaying: false,
   replaySpeed: 1,
-  slowMotionActive: false,
-  slowMotionFrames: [],
-  slowMotionFrameIndex: 0,
-  slowMotionAccumulator: 0,
-  slowMotionPreState: null,
+  slowMotion: createInitialSlowMotionState(),
 
   startGame: (mode, playMode, aiDifficulty) => {
     const balls = setupBalls(mode);
@@ -172,11 +168,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aimAngle: 0,
       power: 0,
       isCharging: false,
-      slowMotionActive: false,
-      slowMotionFrames: [],
-      slowMotionFrameIndex: 0,
-      slowMotionAccumulator: 0,
-      slowMotionPreState: null,
+      slowMotion: createInitialSlowMotionState(),
     });
   },
 
@@ -391,102 +383,96 @@ export const useGameStore = create<GameStore>((set, get) => ({
       replayRecording: false,
       menuTab: 'home',
       replayId: null,
-      slowMotionActive: false,
-      slowMotionFrames: [],
-      slowMotionFrameIndex: 0,
-      slowMotionAccumulator: 0,
-      slowMotionPreState: null,
+      slowMotion: createInitialSlowMotionState(),
     });
   },
 
   startSlowMotion: () => {
     const s = get();
-    if (s.slowMotionActive) return;
+    if (s.slowMotion.active) return;
     const frames = getShotFrames();
     if (frames.length < 2) return;
 
+    const hitBallIds = extractHitBallIds(s.shotHistory);
+
+    const snapshot = {
+      balls: JSON.parse(JSON.stringify(s.balls)),
+      phase: s.phase,
+      currentShot: s.currentShot ? JSON.parse(JSON.stringify(s.currentShot)) : null,
+      currentPlayerId: s.currentPlayerId,
+      players: JSON.parse(JSON.stringify(s.players)),
+      foul: s.foul,
+      foulMessage: s.foulMessage,
+      freeBall: s.freeBall,
+      targetBallHint: s.targetBallHint,
+      shotHistory: JSON.parse(JSON.stringify(s.shotHistory)),
+      turnNumber: s.turnNumber,
+      groupsAssigned: s.groupsAssigned,
+    };
+
     set({
-      slowMotionActive: true,
-      slowMotionFrames: frames,
-      slowMotionFrameIndex: 0,
-      slowMotionAccumulator: 0,
-      slowMotionPreState: {
-        balls: JSON.parse(JSON.stringify(s.balls)),
-        phase: s.phase,
+      slowMotion: {
+        active: true,
+        frames,
+        frameIndex: 0,
+        accumulator: 0,
+        finished: false,
+        hitBallIds,
+        snapshot,
       },
     });
   },
 
   tickSlowMotion: (dt: number) => {
     const s = get();
-    if (!s.slowMotionActive) return;
+    const sm = s.slowMotion;
+    if (!sm.active || sm.finished) return;
 
-    const frames = s.slowMotionFrames;
-    if (frames.length === 0) {
-      get().exitSlowMotion();
-      return;
-    }
+    const result = computeSlowMotionTick(sm.frames, sm.frameIndex, sm.accumulator, dt);
 
-    const slowFactor = 4;
-    const frameInterval = 1 / 60;
-    const slowInterval = frameInterval * slowFactor;
+    const update: Partial<SlowMotionState> = {
+      frameIndex: result.frameIndex,
+      accumulator: result.accumulator,
+      finished: result.finished,
+    };
 
-    let accumulator = s.slowMotionAccumulator + dt;
-    let frameIndex = s.slowMotionFrameIndex;
-
-    while (accumulator >= slowInterval && frameIndex < frames.length - 1) {
-      accumulator -= slowInterval;
-      frameIndex++;
-    }
-
-    if (frameIndex >= frames.length - 1) {
-      frameIndex = frames.length - 1;
-      const lastFrame = frames[frameIndex];
+    if (result.balls) {
       set({
-        slowMotionFrameIndex: frameIndex,
-        slowMotionAccumulator: 0,
-        balls: JSON.parse(JSON.stringify(lastFrame.balls)),
+        slowMotion: { ...sm, ...update },
+        balls: result.balls,
       });
+    } else {
+      set({
+        slowMotion: { ...sm, ...update },
+      });
+    }
+
+    if (result.finished) {
       setTimeout(() => {
         get().exitSlowMotion();
-      }, 400);
-      return;
+      }, SLOW_MOTION_END_DELAY_MS);
     }
-
-    const before = frames[frameIndex];
-    const after = frames[frameIndex + 1];
-    const t = accumulator / slowInterval;
-
-    const balls: Ball[] = before.balls.map((bb, idx) => {
-      const ab = after.balls[idx] || bb;
-      return {
-        ...bb,
-        pos: {
-          x: bb.pos.x + (ab.pos.x - bb.pos.x) * t,
-          y: bb.pos.y + (ab.pos.y - bb.pos.y) * t,
-        },
-        pocketed: t < 0.5 ? bb.pocketed : ab.pocketed,
-      };
-    });
-
-    set({
-      slowMotionFrameIndex: frameIndex,
-      slowMotionAccumulator: accumulator,
-      balls,
-    });
   },
 
   exitSlowMotion: () => {
     const s = get();
-    if (!s.slowMotionActive || !s.slowMotionPreState) return;
+    const sm = s.slowMotion;
+    if (!sm.active || !sm.snapshot) return;
 
     set({
-      slowMotionActive: false,
-      slowMotionFrameIndex: 0,
-      slowMotionAccumulator: 0,
-      balls: JSON.parse(JSON.stringify(s.slowMotionPreState.balls)),
-      phase: s.slowMotionPreState.phase,
-      slowMotionPreState: null,
+      slowMotion: createInitialSlowMotionState(),
+      balls: JSON.parse(JSON.stringify(sm.snapshot.balls)),
+      phase: sm.snapshot.phase,
+      currentShot: sm.snapshot.currentShot ? JSON.parse(JSON.stringify(sm.snapshot.currentShot)) : null,
+      currentPlayerId: sm.snapshot.currentPlayerId,
+      players: JSON.parse(JSON.stringify(sm.snapshot.players)),
+      foul: sm.snapshot.foul,
+      foulMessage: sm.snapshot.foulMessage,
+      freeBall: sm.snapshot.freeBall,
+      targetBallHint: sm.snapshot.targetBallHint,
+      shotHistory: JSON.parse(JSON.stringify(sm.snapshot.shotHistory)),
+      turnNumber: sm.snapshot.turnNumber,
+      groupsAssigned: sm.snapshot.groupsAssigned,
     });
   },
 }));

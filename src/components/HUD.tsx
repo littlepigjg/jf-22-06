@@ -14,9 +14,9 @@ export default function HUD() {
   const turnNumber = useGameStore((s) => s.turnNumber);
   const phase = useGameStore((s) => s.phase);
   const shotHistory = useGameStore((s) => s.shotHistory);
-  const slowMotionActive = useGameStore((s) => s.slowMotionActive);
-  const slowMotionFrames = useGameStore((s) => s.slowMotionFrames);
-  const slowMotionFrameIndex = useGameStore((s) => s.slowMotionFrameIndex);
+  const slowMotionActive = useGameStore((s) => s.slowMotion.active);
+  const slowMotionFrames = useGameStore((s) => s.slowMotion.frames);
+  const slowMotionFrameIndex = useGameStore((s) => s.slowMotion.frameIndex);
   const startSlowMotion = useGameStore((s) => s.startSlowMotion);
   const exitSlowMotion = useGameStore((s) => s.exitSlowMotion);
 
